@@ -1,0 +1,307 @@
+Option Explicit
+
+' ========================================
+' TABLE INVENTORY AND EXPORT SYSTEM
+' ========================================
+' This module provides functions to:
+' 1. Inventory all tables in the workbook
+' 2. Export tables to CSV files
+' 3. Track export history
+' ========================================
+
+' Main function to discover and register all tables in the workbook
+Public Sub InventoryTables()
+    On Error GoTo ErrorHandler
+    
+    Dim ws As Worksheet
+    Dim tbl As ListObject
+    Dim controlTable As ListObject
+    Dim newRow As ListRow
+    Dim tableExists As Boolean
+    Dim controlWs As Worksheet
+    Dim i As Long
+    
+    ' Get reference to control worksheet and table
+    On Error Resume Next
+    Set controlWs = ThisWorkbook.Worksheets("control")
+    On Error GoTo ErrorHandler
+    
+    If controlWs Is Nothing Then
+        MsgBox "Control worksheet not found. Please create a worksheet named 'control' first.", vbExclamation
+        Exit Sub
+    End If
+    
+    On Error Resume Next
+    Set controlTable = controlWs.ListObjects("tbl_control")
+    On Error GoTo ErrorHandler
+    
+    If controlTable Is Nothing Then
+        MsgBox "tbl_control not found in control worksheet. Please create it first.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Ensure control table has the required columns
+    Call EnsureControlTableStructure(controlTable)
+    
+    ' Loop through all worksheets
+    For Each ws In ThisWorkbook.Worksheets
+        ' Loop through all tables in each worksheet
+        For Each tbl In ws.ListObjects
+            ' Check if this table is already in tbl_control
+            tableExists = False
+            
+            If controlTable.ListRows.Count > 0 Then
+                For i = 1 To controlTable.ListRows.Count
+                    If controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "TableName")) = tbl.Name Then
+                        tableExists = True
+                        Exit For
+                    End If
+                Next i
+            End If
+            
+            ' If table doesn't exist in control table, add it
+            If Not tableExists Then
+                Set newRow = controlTable.ListRows.Add
+                With newRow
+                    .Range(1, GetColumnIndex(controlTable, "TableName")) = tbl.Name
+                    .Range(1, GetColumnIndex(controlTable, "SheetName")) = ws.Name
+                    .Range(1, GetColumnIndex(controlTable, "FileName")) = tbl.Name & ".csv"
+                    .Range(1, GetColumnIndex(controlTable, "LastExportDate")) = ""
+                    .Range(1, GetColumnIndex(controlTable, "LastExporter")) = ""
+                End With
+                Debug.Print "Added table: " & tbl.Name & " from sheet: " & ws.Name
+            End If
+        Next tbl
+    Next ws
+    
+    MsgBox "Table inventory complete! All tables have been registered in tbl_control.", vbInformation
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "Error in InventoryTables: " & Err.Description, vbCritical
+End Sub
+
+' Main function to export all tables listed in tbl_control
+Public Sub ExportAllTables()
+    On Error GoTo ErrorHandler
+    
+    Dim controlTable As ListObject
+    Dim controlWs As Worksheet
+    Dim i As Long
+    Dim tableName As String
+    Dim sheetName As String
+    Dim fileName As String
+    Dim exportPath As String
+    Dim tbl As ListObject
+    Dim ws As Worksheet
+    Dim exportCount As Integer
+    Dim currentUser As String
+    Dim currentDateTime As String
+    
+    ' Get current user and datetime
+    currentUser = Environ("USERNAME")
+    currentDateTime = Format(Now, "yyyy-mm-dd hh:mm:ss")
+    
+    ' Get reference to control table
+    On Error Resume Next
+    Set controlWs = ThisWorkbook.Worksheets("control")
+    Set controlTable = controlWs.ListObjects("tbl_control")
+    On Error GoTo ErrorHandler
+    
+    If controlTable Is Nothing Then
+        MsgBox "tbl_control not found. Please run InventoryTables first.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Get the workbook directory path
+    exportPath = ThisWorkbook.Path & "\"
+    
+    exportCount = 0
+    
+    ' Loop through each row in tbl_control
+    If controlTable.ListRows.Count > 0 Then
+        For i = 1 To controlTable.ListRows.Count
+            tableName = controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "TableName"))
+            sheetName = controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "SheetName"))
+            fileName = controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "FileName"))
+            
+            ' Validate we have required data
+            If tableName <> "" And sheetName <> "" And fileName <> "" Then
+                ' Get references to the worksheet and table
+                On Error Resume Next
+                Set ws = ThisWorkbook.Worksheets(sheetName)
+                Set tbl = Nothing
+                If Not ws Is Nothing Then
+                    Set tbl = ws.ListObjects(tableName)
+                End If
+                On Error GoTo ErrorHandler
+                
+                If Not tbl Is Nothing Then
+                    ' Export the table to CSV
+                    If ExportTableToCSV(tbl, exportPath & fileName) Then
+                        ' Update the control table with export info
+                        controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "LastExportDate")) = currentDateTime
+                        controlTable.DataBodyRange.Cells(i, GetColumnIndex(controlTable, "LastExporter")) = currentUser
+                        exportCount = exportCount + 1
+                        Debug.Print "Exported: " & tableName & " to " & fileName
+                    Else
+                        Debug.Print "Failed to export: " & tableName
+                    End If
+                Else
+                    Debug.Print "Warning: Could not find table '" & tableName & "' in sheet '" & sheetName & "'"
+                End If
+            End If
+        Next i
+    End If
+    
+    ' Export the VBA code
+    Call ExportVBACode(exportPath)
+    
+    MsgBox "Export complete! " & exportCount & " tables exported to: " & vbCrLf & exportPath, vbInformation
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "Error in ExportAllTables: " & Err.Description, vbCritical
+End Sub
+
+' Helper function to export a single table to CSV
+Private Function ExportTableToCSV(tbl As ListObject, fullFilePath As String) As Boolean
+    On Error GoTo ErrorHandler
+    
+    Dim fileNum As Integer
+    Dim row As Long
+    Dim col As Long
+    Dim outputLine As String
+    Dim dataRange As Range
+    Dim headerRange As Range
+    
+    ExportTableToCSV = False
+    
+    fileNum = FreeFile
+    Open fullFilePath For Output As #fileNum
+    
+    ' Write header row
+    Set headerRange = tbl.HeaderRowRange
+    outputLine = ""
+    For col = 1 To headerRange.Columns.Count
+        If col > 1 Then outputLine = outputLine & ","
+        outputLine = outputLine & CSVEscape(headerRange.Cells(1, col).Value)
+    Next col
+    Print #fileNum, outputLine
+    
+    ' Write data rows
+    If Not tbl.DataBodyRange Is Nothing Then
+        Set dataRange = tbl.DataBodyRange
+        For row = 1 To dataRange.Rows.Count
+            outputLine = ""
+            For col = 1 To dataRange.Columns.Count
+                If col > 1 Then outputLine = outputLine & ","
+                outputLine = outputLine & CSVEscape(dataRange.Cells(row, col).Value)
+            Next col
+            Print #fileNum, outputLine
+        Next row
+    End If
+    
+    Close #fileNum
+    ExportTableToCSV = True
+    Exit Function
+    
+ErrorHandler:
+    If fileNum > 0 Then Close #fileNum
+    ExportTableToCSV = False
+End Function
+
+' Helper function to properly escape CSV values
+Private Function CSVEscape(value As Variant) As String
+    Dim strValue As String
+    
+    strValue = CStr(value)
+    
+    ' If the value contains comma, quote, or newline, enclose in quotes
+    If InStr(strValue, ",") > 0 Or InStr(strValue, """") > 0 Or InStr(strValue, vbCrLf) > 0 Or InStr(strValue, vbCr) > 0 Or InStr(strValue, vbLf) > 0 Then
+        ' Replace any quotes with double quotes
+        strValue = Replace(strValue, """", """""")
+        strValue = """" & strValue & """"
+    End If
+    
+    CSVEscape = strValue
+End Function
+
+' Helper function to get column index by header name
+Private Function GetColumnIndex(tbl As ListObject, headerName As String) As Long
+    Dim col As Long
+    
+    GetColumnIndex = 0
+    For col = 1 To tbl.ListColumns.Count
+        If tbl.ListColumns(col).Name = headerName Then
+            GetColumnIndex = col
+            Exit Function
+        End If
+    Next col
+End Function
+
+' Helper function to ensure control table has required columns
+Private Sub EnsureControlTableStructure(tbl As ListObject)
+    Dim requiredColumns As Variant
+    Dim i As Long
+    Dim columnExists As Boolean
+    Dim col As Long
+    
+    requiredColumns = Array("TableName", "SheetName", "FileName", "LastExportDate", "LastExporter")
+    
+    For i = LBound(requiredColumns) To UBound(requiredColumns)
+        columnExists = False
+        For col = 1 To tbl.ListColumns.Count
+            If tbl.ListColumns(col).Name = requiredColumns(i) Then
+                columnExists = True
+                Exit For
+            End If
+        Next col
+        
+        If Not columnExists Then
+            tbl.ListColumns.Add.Name = requiredColumns(i)
+        End If
+    Next i
+End Sub
+
+' Helper function to export VBA code modules
+Private Sub ExportVBACode(exportPath As String)
+    On Error GoTo ErrorHandler
+    
+    Dim vbComp As Object
+    Dim fileName As String
+    Dim exportedCount As Integer
+    
+    exportedCount = 0
+    
+    ' Loop through all VBA components
+    For Each vbComp In ThisWorkbook.VBProject.VBComponents
+        ' Determine file extension based on component type
+        Select Case vbComp.Type
+            Case 1 ' vbext_ct_StdModule
+                fileName = vbComp.Name & ".bas"
+            Case 2 ' vbext_ct_ClassModule
+                fileName = vbComp.Name & ".cls"
+            Case 3 ' vbext_ct_MSForm
+                fileName = vbComp.Name & ".frm"
+            Case 100 ' vbext_ct_Document (worksheet/workbook modules)
+                fileName = vbComp.Name & ".cls"
+            Case Else
+                fileName = ""
+        End Select
+        
+        ' Export if it's a standard module, class module, or form
+        If fileName <> "" And (vbComp.Type = 1 Or vbComp.Type = 2 Or vbComp.Type = 3) Then
+            vbComp.Export exportPath & fileName
+            exportedCount = exportedCount + 1
+            Debug.Print "Exported VBA module: " & fileName
+        End If
+    Next vbComp
+    
+    Debug.Print "Exported " & exportedCount & " VBA modules"
+    Exit Sub
+    
+ErrorHandler:
+    Debug.Print "Error exporting VBA code: " & Err.Description
+    Debug.Print "Note: You may need to enable 'Trust access to the VBA project object model' in Excel Options > Trust Center > Trust Center Settings > Macro Settings"
+End Sub
